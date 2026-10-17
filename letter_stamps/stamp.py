@@ -4,8 +4,10 @@ The letterform face is the top of the solid, at ``z = depth``, and the body
 widens on the way down to ``z = 0``, so the walls flare back away from the
 contact face. Looking down at the model from ``+z`` therefore shows the
 stamping surface itself, reading mirrored, the way a real stamp looks when you
-turn it face up. An optional base pad goes underneath, and the whole thing
-sits on ``z = 0``, flat side down, ready to print.
+turn it face up. Underneath is a rectangular base, as wide as the letter plus
+a margin and as tall as the font's ascent to descent, so every letter of a
+font comes out the same height. The whole thing sits on ``z = 0``, flat side
+down, ready to print.
 """
 
 import math
@@ -15,9 +17,7 @@ from functools import reduce
 import cadquery as cq
 
 from .geom import DEFAULT_TOLERANCE, contours_to_faces
-
-BASE_KINDS = ("none", "disc", "plate")
-
+from .glyph import bbox
 
 class DraftDropped(UserWarning):
     """The requested draft could not be applied; the walls came out straight."""
@@ -25,6 +25,10 @@ class DraftDropped(UserWarning):
 
 class ThinFeature(UserWarning):
     """The draft is large next to the finest detail in the outline."""
+
+
+class Overhang(UserWarning):
+    """The letter reaches past the base rectangle around it."""
 
 
 def _min_feature_warning(faces, depth, draft):
@@ -159,16 +163,49 @@ def _extrude(faces, depth, draft):
     return cq.Workplane("XY").add(shape)
 
 
-def _add_base(body, kind, thickness, margin, chamfer):
-    """Put a pad under the letter, sized to cover its widest cross-section."""
-    body = body.translate((0, 0, thickness))
+def _overhang_warning(body, outline):
+    """Say so when the letter reaches past its base, in either direction.
+
+    The two directions mean different things and have different remedies, so
+    they are reported apart. Sideways, the draft has pushed the widest
+    cross-section out further than the margin allows, which a wider margin or
+    a shallower draft would fix. Vertically, the glyph itself reaches past the
+    font's own ascent or descent, as accents usually do; the base height is
+    fixed on purpose, so there is nothing to adjust. The draft is left out of
+    the vertical test, since a capital reaching the ascent would otherwise
+    report an overhang that no setting can remove.
+
+    Nothing is trimmed either way.
+    """
     box = body.val().BoundingBox()
-    pad = cq.Workplane("XY")
-    if kind == "disc":
-        pad = pad.circle(0.5 * math.hypot(box.xlen, box.ylen) + margin)
-    else:
-        pad = pad.rect(box.xlen + 2 * margin, box.ylen + 2 * margin)
-    result = body.union(pad.extrude(thickness))
+    bx0, by0, bx1, by1 = outline.box
+
+    sideways = max(bx0 - box.xmin, box.xmax - bx1)
+    if sideways > 1e-6:
+        warnings.warn(
+            f"{outline.char!r} and its draft reach {sideways:.2f} mm past the "
+            f"side of its {outline.width:.2f} mm wide base; a larger "
+            f"--base-margin, or less draft, would contain it",
+            Overhang,
+        )
+
+    _, gy0, _, gy1 = bbox(outline.contours)
+    vertical = max(by0 - gy0, gy1 - by1)
+    if vertical > 1e-6:
+        warnings.warn(
+            f"{outline.char!r} reaches {vertical:.2f} mm past the font's ascent "
+            f"or descent, so it hangs over the edge of a base whose height is "
+            f"fixed at {outline.height:.2f} mm",
+            Overhang,
+        )
+
+
+def _add_base(body, outline, thickness, chamfer):
+    """Put the base rectangle under the letter."""
+    _overhang_warning(body, outline)
+    body = body.translate((0, 0, thickness))
+    pad = cq.Workplane("XY").rect(outline.width, outline.height).extrude(thickness)
+    result = body.union(pad)
 
     if chamfer > 0:
         try:
@@ -179,32 +216,26 @@ def _add_base(body, kind, thickness, margin, chamfer):
 
 
 def build_stamp(
-    contours,
+    outline,
     depth=4.0,
     draft=7.0,
-    base="none",
     base_thickness=2.0,
-    base_margin=1.5,
     base_chamfer=0.0,
     tolerance=DEFAULT_TOLERANCE,
 ):
-    """Stamp solid for a glyph outline, as a ``cq.Workplane``."""
-    if base not in BASE_KINDS:
-        raise ValueError(f"base must be one of {BASE_KINDS}")
+    """Stamp solid for an ``Outline``, as a ``cq.Workplane``."""
     if depth <= 0:
         raise ValueError("depth must be positive")
+    if base_thickness <= 0:
+        raise ValueError("base_thickness must be positive")
     if not -45 < draft < 45:
         raise ValueError("draft must be between -45 and 45 degrees")
 
-    faces = contours_to_faces(contours, tolerance)
+    faces = contours_to_faces(outline.contours, tolerance)
     _min_feature_warning(faces, depth, draft)
 
     # Built letterform-down and widening upward, then turned over so the
     # letterform is the top face.
     body = _extrude(faces, depth, draft).mirror("XY").translate((0, 0, depth))
 
-    if base != "none":
-        if base_thickness <= 0:
-            raise ValueError("base_thickness must be positive")
-        body = _add_base(body, base, base_thickness, base_margin, base_chamfer)
-    return body
+    return _add_base(body, outline, base_thickness, base_chamfer)

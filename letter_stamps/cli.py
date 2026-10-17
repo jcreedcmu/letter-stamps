@@ -6,8 +6,8 @@ import sys
 import cadquery as cq
 
 from .geom import DEFAULT_TOLERANCE
-from .glyph import SIZE_MODES, load_outline
-from .stamp import BASE_KINDS, build_stamp
+from .glyph import DEFAULT_MARGIN, SIZE_MODES, load_outline
+from .stamp import build_stamp
 
 
 def default_output(char):
@@ -28,9 +28,11 @@ def parse_args(argv=None):
     p.add_argument(
         "--size-mode",
         choices=SIZE_MODES,
-        default="bbox",
-        help="what --size measures: the glyph's own height (bbox), the font's "
-        "cap height, or its em square",
+        default="cap",
+        help="what --size measures: the font's cap height (cap), its em square "
+        "(em), or the glyph's own height (bbox). Only cap and em scale every "
+        "letter by the same factor, so only they give a set of stamps one "
+        "common base height",
     )
     p.add_argument("--depth", type=float, default=4.0, help="extrusion depth in mm")
     p.add_argument("--draft", type=float, default=7.0, help="draft angle in degrees")
@@ -41,10 +43,23 @@ def parse_args(argv=None):
         "impression does not)",
     )
 
-    p.add_argument("--base", choices=BASE_KINDS, default="none")
-    p.add_argument("--base-thickness", type=float, default=2.0)
-    p.add_argument("--base-margin", type=float, default=1.5)
-    p.add_argument("--base-chamfer", type=float, default=0.0)
+    p.add_argument(
+        "--base-thickness", type=float, default=2.0, help="base thickness in mm"
+    )
+    p.add_argument(
+        "--base-margin",
+        type=float,
+        default=DEFAULT_MARGIN,
+        help="base to leave either side of the letter in mm. The base's height "
+        "is not adjustable: it is the font's ascent to descent, so every letter "
+        "comes out the same height",
+    )
+    p.add_argument(
+        "--base-chamfer",
+        type=float,
+        default=0.0,
+        help="chamfer on the base's bottom edge in mm",
+    )
 
     p.add_argument(
         "--chord-tolerance",
@@ -70,20 +85,19 @@ def main(argv=None):
     out = args.out or default_output(args.char)
 
     try:
-        contours = load_outline(
+        outline = load_outline(
             args.font,
             args.char,
             size=args.size,
             size_mode=args.size_mode,
             mirror=not args.no_mirror,
+            margin=args.base_margin,
         )
         body = build_stamp(
-            contours,
+            outline,
             depth=args.depth,
             draft=args.draft,
-            base=args.base,
             base_thickness=args.base_thickness,
-            base_margin=args.base_margin,
             base_chamfer=args.base_chamfer,
             tolerance=args.chord_tolerance,
         )
@@ -105,7 +119,8 @@ def main(argv=None):
 
     print(
         f"wrote {out}  "
-        f"({box.xlen:.2f} x {box.ylen:.2f} x {box.zlen:.2f} mm, "
+        f"({box.xlen:.2f} x {box.ylen:.2f} x {box.zlen:.2f} mm overall, "
+        f"base {outline.width:.2f} x {outline.height:.2f} mm, "
         f"volume {volume:.1f} mm^3)"
     )
     return 0

@@ -1,5 +1,18 @@
 """Read a glyph out of a font file as scaled, mirrored, centered contours.
 
+The base rectangle around the glyph is as wide as the glyph plus a margin on
+each side, and always as tall as the font's ascent to descent. Height is
+therefore the same for every letter of a font at a given size. The rectangle
+is centered on the origin.
+
+Within it, every letter is dropped by half the descent from where the baseline
+would otherwise put it. Fonts leave little room between their cap height and
+their ascent, so a capital placed strictly by the baseline nearly touches the
+top edge; splitting the descent's slack between the two edges leaves a capital
+close to centered. Every letter moves by the same amount, so they keep a
+common baseline. A full descender reaches further down than it used to and can
+pass the bottom edge, which is reported.
+
 A contour is a list of segments forming a closed loop. A segment is one of
 
     ("line", p0, p1)
@@ -10,11 +23,46 @@ where each point is an ``(x, y)`` tuple.
 """
 
 import math
+from dataclasses import dataclass
 
 from fontTools.pens.basePen import BasePen
 from fontTools.ttLib import TTFont
 
 SIZE_MODES = ("bbox", "cap", "em")
+
+#: Default gap in mm between the letter and the left and right base edges.
+DEFAULT_MARGIN = 1.5
+
+
+@dataclass(frozen=True)
+class Outline:
+    """A placed, scaled glyph outline and the base rectangle around it.
+
+    All lengths are mm. The rectangle spans ``±width / 2`` by ``±height / 2``.
+    Its height is the font's ascent to descent, so every letter at a given
+    size gets the same one; its width is the letter plus ``margin`` either
+    side, so it is the letter that is centered horizontally. ``baseline`` is
+    where the glyph's own y = 0 ended up, which is half the descent above the
+    bottom edge.
+    """
+
+    char: str
+    contours: list
+    width: float
+    height: float
+    scale: float
+    margin: float
+    baseline: float
+
+    @property
+    def box(self):
+        """``(xmin, ymin, xmax, ymax)`` of the base rectangle."""
+        return (
+            -0.5 * self.width,
+            -0.5 * self.height,
+            0.5 * self.width,
+            0.5 * self.height,
+        )
 
 
 class ContourPen(BasePen):
@@ -167,8 +215,8 @@ def map_points(contours, fn):
     ]
 
 
-def raw_contours(font, char):
-    """Contours of ``char`` in font units."""
+def glyph_name(font, char):
+    """The font's name for ``char``'s glyph."""
     try:
         cmap = font.getBestCmap()
     except Exception as exc:  # no usable unicode cmap (symbol fonts)
@@ -176,15 +224,47 @@ def raw_contours(font, char):
     name = cmap.get(ord(char))
     if name is None:
         raise ValueError(f"font has no glyph for {char!r} (U+{ord(char):04X})")
+    return name
+
+
+def raw_contours(font, name):
+    """Contours of the glyph called ``name``, in font units."""
     glyph_set = font.getGlyphSet()
     pen = ContourPen(glyph_set)
     glyph_set[name].draw(pen)
     if not pen.contours:
-        raise ValueError(f"glyph for {char!r} is empty")
+        raise ValueError(f"glyph {name!r} is empty")
     return pen.contours
 
 
-def _reference_height(font, contours, size_mode):
+def vertical_metrics(font):
+    """``(ascent, descent)`` in font units.
+
+    These come from ``hhea``, the values a text engine lays lines out with.
+    They are not a bound on the outlines: accents reach above the ascent in
+    most fonts, and ``OS/2.usWinAscent`` is the field that covers those. Line
+    metrics are the right choice here anyway, being what makes one letter's
+    stamp the same height as the next one's.
+    """
+    ascent = descent = None
+    hhea = font.get("hhea")
+    if hhea is not None:
+        ascent = getattr(hhea, "ascender", getattr(hhea, "ascent", None))
+        descent = getattr(hhea, "descender", getattr(hhea, "descent", None))
+
+    if not (ascent and descent is not None and descent < 0):
+        os2 = font.get("OS/2")
+        if os2 is not None:
+            ascent, descent = os2.sTypoAscender, os2.sTypoDescender
+
+    if not (ascent and descent is not None and descent < 0):
+        upem = font["head"].unitsPerEm
+        ascent, descent = round(0.8 * upem), -round(0.2 * upem)
+
+    return ascent, descent
+
+
+def _reference_height(font, glyph_box, size_mode):
     if size_mode == "em":
         return font["head"].unitsPerEm
     if size_mode == "cap":
@@ -193,16 +273,28 @@ def _reference_height(font, contours, size_mode):
             return cap
         # Not all fonts record a cap height; measure one instead.
         try:
-            _, ymin, _, ymax = bbox(raw_contours(font, "H"))
+            _, ymin, _, ymax = bbox(raw_contours(font, glyph_name(font, "H")))
             return ymax - ymin
-        except ValueError:
+        except (ValueError, KeyError):
             return 0.7 * font["head"].unitsPerEm
-    _, ymin, _, ymax = bbox(contours)
-    return ymax - ymin
+    return glyph_box[3] - glyph_box[1]
 
 
-def load_outline(font_path, char, size, size_mode="bbox", mirror=True):
-    """Contours for ``char``, in mm, mirrored in x and centered on the origin.
+def load_outline(
+    font_path,
+    char,
+    size,
+    size_mode="cap",
+    mirror=True,
+    margin=DEFAULT_MARGIN,
+):
+    """An ``Outline`` for ``char``: contours in mm, mirrored in x, inside a base
+    rectangle centered on the origin.
+
+    The letter is centered horizontally, with ``margin`` mm of base either
+    side of it. Vertically it sits on a baseline half the descent above the
+    bottom edge, between an ascent and a descent that do not vary from letter
+    to letter.
 
     The mirror is what makes the impression read the right way round. It also
     reverses every contour's winding, which ``geom`` reassigns from scratch.
@@ -211,17 +303,44 @@ def load_outline(font_path, char, size, size_mode="bbox", mirror=True):
         raise ValueError(f"size_mode must be one of {SIZE_MODES}")
     if len(char) != 1:
         raise ValueError("char must be a single character")
+    if margin < 0:
+        raise ValueError("margin cannot be negative")
 
     font = TTFont(font_path)
-    contours = raw_contours(font, char)
+    contours = raw_contours(font, glyph_name(font, char))
+    glyph_box = bbox(contours)
 
-    reference = _reference_height(font, contours, size_mode)
+    reference = _reference_height(font, glyph_box, size_mode)
     if reference <= 0:
         raise ValueError(f"cannot size {char!r}: reference height is zero")
     scale = size / reference
-    sx = -scale if mirror else scale
-    contours = map_points(contours, lambda p: (p[0] * sx, p[1] * scale))
 
-    xmin, ymin, xmax, ymax = bbox(contours)
-    cx, cy = 0.5 * (xmin + xmax), 0.5 * (ymin + ymax)
-    return map_points(contours, lambda p: (p[0] - cx, p[1] - cy))
+    ascent, descent = vertical_metrics(font)
+    width = (glyph_box[2] - glyph_box[0]) * scale + 2 * margin
+    height = (ascent - descent) * scale
+
+    center = 0.5 * (glyph_box[0] + glyph_box[2])
+    direction = -1 if mirror else 1
+
+    # Placing the baseline a full descent above the bottom edge would leave a
+    # capital almost touching the top one. Dropping everything by half the
+    # descent splits that slack between the two edges.
+    middle = 0.5 * (ascent + descent) * scale
+    drop = -0.5 * descent * scale
+    baseline = -(middle + drop)
+
+    def place(p):
+        return (
+            direction * (p[0] - center) * scale,
+            p[1] * scale + baseline,
+        )
+
+    return Outline(
+        char,
+        map_points(contours, place),
+        width,
+        height,
+        scale,
+        margin,
+        baseline,
+    )

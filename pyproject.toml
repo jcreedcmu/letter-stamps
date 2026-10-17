@@ -12,16 +12,8 @@ dependencies = [
     "fonttools>=4.40",
 ]
 
-[project.optional-dependencies]
-test = ["pytest>=7"]
-
 [project.scripts]
 letter-stamp = "letter_stamps.cli:main"
 
 [tool.setuptools]
 packages = ["letter_stamps"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["."]
-filterwarnings = ["ignore::DeprecationWarning"]

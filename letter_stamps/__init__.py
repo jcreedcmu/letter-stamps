@@ -1,7 +1,15 @@
-"""Turn a TTF glyph into a tapered stamp solid."""
+"""Turn a TTF glyph into a stamp solid on a rectangular base."""
 
-from .glyph import load_outline
 from .geom import contours_to_faces
-from .stamp import build_stamp
+from .glyph import Outline, load_outline
+from .stamp import DraftDropped, Overhang, ThinFeature, build_stamp
 
-__all__ = ["load_outline", "contours_to_faces", "build_stamp"]
+__all__ = [
+    "DraftDropped",
+    "Outline",
+    "Overhang",
+    "ThinFeature",
+    "build_stamp",
+    "contours_to_faces",
+    "load_outline",
+]
