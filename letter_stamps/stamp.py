@@ -6,8 +6,9 @@ contact face. Looking down at the model from ``+z`` therefore shows the
 stamping surface itself, reading mirrored, the way a real stamp looks when you
 turn it face up. Underneath is a rectangular base, as wide as the letter plus
 a margin and as tall as the font's ascent to descent, so every letter of a
-font comes out the same height. The whole thing sits on ``z = 0``, flat side
-down, ready to print.
+font comes out the same height. A dovetail groove runs the height of its back
+face, to slide onto a rail. The whole thing sits on ``z = 0``, flat side down,
+ready to print.
 """
 
 import math
@@ -29,6 +30,22 @@ class ThinFeature(UserWarning):
 
 class Overhang(UserWarning):
     """The letter reaches past the base rectangle around it."""
+
+
+#: The groove is a dovetail in the back of the base: a narrow mouth at the
+#: open face widening to a broader inner edge, the two joined at 45 degrees.
+#: Every base carries the same one, so stamps are interchangeable on a rail,
+#: which is why these are constants and not options.
+GROOVE_MOUTH = 5.0
+GROOVE_INNER = 10.0
+
+#: 45 degrees means each side steps out by half the difference in width, and
+#: rises by as much again.
+GROOVE_DEPTH = 0.5 * (GROOVE_INNER - GROOVE_MOUTH)
+
+#: Least base left either side of the groove, and least left above it.
+GROOVE_WALL = 1.0
+GROOVE_WEB = 1.0
 
 
 def _min_feature_warning(faces, depth, draft):
@@ -200,11 +217,48 @@ def _overhang_warning(body, outline):
         )
 
 
+def _groove(length):
+    """The dovetail, as a solid to cut away.
+
+    The profile is drawn in the xz plane and extruded along y, so the groove
+    runs the height of the base and is open at both ends. ``cq``'s ``XZ``
+    plane has its normal along -y, hence the symmetric extrude: it reaches the
+    same distance either way regardless.
+    """
+    mouth, inner = 0.5 * GROOVE_MOUTH, 0.5 * GROOVE_INNER
+    return (
+        cq.Workplane("XZ")
+        .moveTo(-mouth, 0)
+        .lineTo(mouth, 0)
+        .lineTo(inner, GROOVE_DEPTH)
+        .lineTo(-inner, GROOVE_DEPTH)
+        .close()
+        .extrude(0.5 * length, both=True)
+    )
+
+
 def _add_base(body, outline, thickness, chamfer):
-    """Put the base rectangle under the letter."""
+    """Put the grooved base rectangle under the letter."""
+    if outline.width < GROOVE_INNER + 2 * GROOVE_WALL:
+        raise ValueError(
+            f"a {outline.width:.2f} mm base cannot take the "
+            f"{GROOVE_INNER:g} mm groove and leave {GROOVE_WALL:g} mm of wall "
+            f"either side; raise --base-min-width"
+        )
+    if thickness < GROOVE_DEPTH + GROOVE_WEB:
+        raise ValueError(
+            f"a {thickness:.2f} mm base is too thin for a {GROOVE_DEPTH:g} mm "
+            f"groove with {GROOVE_WEB:g} mm of material over it; raise "
+            f"--base-thickness"
+        )
+
     _overhang_warning(body, outline)
     body = body.translate((0, 0, thickness))
+
     pad = cq.Workplane("XY").rect(outline.width, outline.height).extrude(thickness)
+    # Overshoot the ends of the base so the cut leaves no sliver behind.
+    pad = pad.cut(_groove(outline.height + 2.0))
+
     result = body.union(pad)
 
     if chamfer > 0:
@@ -219,7 +273,7 @@ def build_stamp(
     outline,
     depth=4.0,
     draft=7.0,
-    base_thickness=2.0,
+    base_thickness=4.5,
     base_chamfer=0.0,
     tolerance=DEFAULT_TOLERANCE,
 ):

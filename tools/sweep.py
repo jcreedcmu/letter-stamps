@@ -25,6 +25,7 @@ from letter_stamps.cli import default_output  # noqa: E402
 from letter_stamps.geom import DEFAULT_TOLERANCE, contours_to_faces  # noqa: E402
 from letter_stamps.glyph import (  # noqa: E402
     DEFAULT_MARGIN,
+    DEFAULT_MIN_WIDTH,
     SIZE_MODES,
     load_outline,
 )
@@ -53,8 +54,9 @@ def parse_args(argv=None):
     p.add_argument("--depth", type=float, default=4.0)
     p.add_argument("--draft", type=float, default=7.0)
     p.add_argument("--tolerance", type=float, default=DEFAULT_TOLERANCE)
-    p.add_argument("--base-thickness", type=float, default=2.0)
+    p.add_argument("--base-thickness", type=float, default=4.5)
     p.add_argument("--base-margin", type=float, default=DEFAULT_MARGIN)
+    p.add_argument("--base-min-width", type=float, default=DEFAULT_MIN_WIDTH)
     p.add_argument(
         "--out-dir",
         help="write each solid here as stamp_<char>.<ext>; nothing is written "
@@ -83,6 +85,7 @@ def describe(args, char, out_dir):
                 size=args.size,
                 size_mode=args.size_mode,
                 margin=args.base_margin,
+                min_width=args.base_min_width,
             )
             contours = outline.contours
             faces = contours_to_faces(contours, args.tolerance)

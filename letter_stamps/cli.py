@@ -6,7 +6,7 @@ import sys
 import cadquery as cq
 
 from .geom import DEFAULT_TOLERANCE
-from .glyph import DEFAULT_MARGIN, SIZE_MODES, load_outline
+from .glyph import DEFAULT_MARGIN, DEFAULT_MIN_WIDTH, SIZE_MODES, load_outline
 from .stamp import build_stamp
 
 
@@ -44,7 +44,10 @@ def parse_args(argv=None):
     )
 
     p.add_argument(
-        "--base-thickness", type=float, default=2.0, help="base thickness in mm"
+        "--base-thickness",
+        type=float,
+        default=4.5,
+        help="base thickness in mm, groove included",
     )
     p.add_argument(
         "--base-margin",
@@ -53,6 +56,14 @@ def parse_args(argv=None):
         help="base to leave either side of the letter in mm. The base's height "
         "is not adjustable: it is the font's ascent to descent, so every letter "
         "comes out the same height",
+    )
+    p.add_argument(
+        "--base-min-width",
+        type=float,
+        default=DEFAULT_MIN_WIDTH,
+        help="narrowest base to produce in mm, whatever the margins work out "
+        "to. A letter narrower than this gets a wider base rather than a "
+        "narrower groove, so every stamp fits the same rail",
     )
     p.add_argument(
         "--base-chamfer",
@@ -92,6 +103,7 @@ def main(argv=None):
             size_mode=args.size_mode,
             mirror=not args.no_mirror,
             margin=args.base_margin,
+            min_width=args.base_min_width,
         )
         body = build_stamp(
             outline,

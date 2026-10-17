@@ -1,9 +1,10 @@
 """Read a glyph out of a font file as scaled, mirrored, centered contours.
 
 The base rectangle around the glyph is as wide as the glyph plus a margin on
-each side, and always as tall as the font's ascent to descent. Height is
-therefore the same for every letter of a font at a given size. The rectangle
-is centered on the origin.
+each side, subject to a minimum, and always as tall as the font's ascent to
+descent. Height is therefore the same for every letter of a font at a given
+size. The rectangle is centered on the origin, and so is the letter: a narrow
+letter widened to the minimum simply gets more margin than it asked for.
 
 Within it, every letter is dropped by half the descent from where the baseline
 would otherwise put it. Fonts leave little room between their cap height and
@@ -33,6 +34,10 @@ SIZE_MODES = ("bbox", "cap", "em")
 #: Default gap in mm between the letter and the left and right base edges.
 DEFAULT_MARGIN = 1.5
 
+#: Narrow letters get a wider base than their margins call for, so that every
+#: base can take the same groove with wall left either side.
+DEFAULT_MIN_WIDTH = 15.0
+
 
 @dataclass(frozen=True)
 class Outline:
@@ -41,9 +46,9 @@ class Outline:
     All lengths are mm. The rectangle spans ``±width / 2`` by ``±height / 2``.
     Its height is the font's ascent to descent, so every letter at a given
     size gets the same one; its width is the letter plus ``margin`` either
-    side, so it is the letter that is centered horizontally. ``baseline`` is
-    where the glyph's own y = 0 ended up, which is half the descent above the
-    bottom edge.
+    side or the minimum width, whichever is greater. The letter is centered
+    horizontally either way. ``baseline`` is where the glyph's own y = 0 ended
+    up, which is half the descent above the bottom edge.
     """
 
     char: str
@@ -287,12 +292,14 @@ def load_outline(
     size_mode="cap",
     mirror=True,
     margin=DEFAULT_MARGIN,
+    min_width=DEFAULT_MIN_WIDTH,
 ):
     """An ``Outline`` for ``char``: contours in mm, mirrored in x, inside a base
     rectangle centered on the origin.
 
-    The letter is centered horizontally, with ``margin`` mm of base either
-    side of it. Vertically it sits on a baseline half the descent above the
+    The letter is centered horizontally, with at least ``margin`` mm of base
+    either side of it and more if ``min_width`` forces the base wider than the
+    margins would. Vertically it sits on a baseline half the descent above the
     bottom edge, between an ascent and a descent that do not vary from letter
     to letter.
 
@@ -305,6 +312,8 @@ def load_outline(
         raise ValueError("char must be a single character")
     if margin < 0:
         raise ValueError("margin cannot be negative")
+    if min_width < 0:
+        raise ValueError("min_width cannot be negative")
 
     font = TTFont(font_path)
     contours = raw_contours(font, glyph_name(font, char))
@@ -316,7 +325,9 @@ def load_outline(
     scale = size / reference
 
     ascent, descent = vertical_metrics(font)
-    width = (glyph_box[2] - glyph_box[0]) * scale + 2 * margin
+    width = max(
+        (glyph_box[2] - glyph_box[0]) * scale + 2 * margin, min_width
+    )
     height = (ascent - descent) * scale
 
     center = 0.5 * (glyph_box[0] + glyph_box[2])
