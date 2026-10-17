@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "letter-stamps"
+version = "0.1.0"
+description = "Turn a TTF glyph into a tapered stamp solid (STEP/STL)"
+requires-python = ">=3.10"
+dependencies = [
+    "cadquery>=2.4",
+    "fonttools>=4.40",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+letter-stamp = "letter_stamps.cli:main"
+
+[tool.setuptools]
+packages = ["letter_stamps"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = ["ignore::DeprecationWarning"]
