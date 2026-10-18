@@ -18,7 +18,7 @@ from functools import reduce
 import cadquery as cq
 
 from .geom import DEFAULT_TOLERANCE, contours_to_faces
-from .glyph import bbox
+from .glyph import bbox, flatten
 
 class DraftDropped(UserWarning):
     """The requested draft could not be applied; the walls came out straight."""
@@ -74,42 +74,8 @@ def _min_feature_warning(faces, depth, draft):
             return
 
 
-def _offset_wire(wire, delta, grow):
-    """Offset ``wire`` by ``delta``, outward if ``grow`` else inward.
-
-    Only the ``intersection`` join type is any use here: it extends offset
-    edges to meet, which keeps the edge count and lets the walls correspond
-    one for one. The ``arc`` join type offsets happily but rounds every corner
-    into extra edges, and a loft between wires of unequal edge count always
-    fails, so it is not worth trying.
-
-    Hole wires can wind either way, so both signs are tried and the result is
-    picked by whether it came out bigger or smaller than the original. Raises
-    ``ValueError`` describing what went wrong if nothing usable comes back.
-    """
-    box = wire.BoundingBox()
-    original = box.xlen * box.ylen
-    problems = []
-
-    for signed in (delta, -delta):
-        try:
-            candidates = wire.offset2D(signed, "intersection")
-        except Exception as exc:
-            problems.append(f"offsetting by {signed:+.3f} mm raised {type(exc).__name__}")
-            continue
-        if len(candidates) != 1:
-            problems.append(
-                f"offsetting by {signed:+.3f} mm broke the outline into "
-                f"{len(candidates)} wires"
-            )
-            continue
-        candidate = candidates[0]
-        cbox = candidate.BoundingBox()
-        if ((cbox.xlen * cbox.ylen) > original) != grow:
-            continue
-        return candidate
-
-    raise ValueError("; ".join(problems) or "no offset came out the right size")
+#: Boundary edges shorter than this are skipped as degenerate, in mm.
+EPS = 1e-9
 
 
 def _straight(face, depth):
@@ -117,67 +83,96 @@ def _straight(face, depth):
     return cq.Solid.extrudeLinear(face, cq.Vector(0, 0, depth), 0)
 
 
-def _loft_pair(near, far, depth):
-    return cq.Solid.makeLoft([near, far.translate((0, 0, depth))], True)
+def _wedge(a, b, depth, delta):
+    """A triangular prism along one boundary edge, leaning out by ``delta``.
+
+    It leans the same amount to either side of the edge. The inward half lands
+    inside the letter, where the union swallows it, and not having to work out
+    which side is outward means the winding of a contour never matters here.
+    """
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length = math.hypot(dx, dy)
+    nx, ny = dy / length * delta, -dx / length * delta
+    triangle = [
+        (a[0], a[1], 0.0),
+        (a[0] + nx, a[1] + ny, depth),
+        (a[0] - nx, a[1] - ny, depth),
+    ]
+    section = cq.Face.makeFromWires(
+        cq.Wire.makePolygon([cq.Vector(*p) for p in triangle], close=True)
+    )
+    return cq.Solid.extrudeLinear(section, cq.Vector(dx, dy, 0), 0)
 
 
-def _draft_one(face, depth, delta):
-    """One drafted solid, or ``ValueError`` explaining why not."""
-    outer = face.outerWire()
-    wide = _offset_wire(outer, delta, grow=True)
-    try:
-        solid = _loft_pair(outer, wide, depth)
-    except Exception as exc:
-        raise ValueError(
-            f"lofting {len(outer.Edges())} edges to {len(wide.Edges())} failed "
-            f"({type(exc).__name__}), which usually means the offset outline "
-            f"crossed itself"
-        ) from exc
+def _draft_parts(polygons, depth, delta):
+    """The pieces that, unioned with the straight prism, make the draft.
 
-    for inner in face.innerWires():
-        # A hole shrinks as the outline grows. One too tight to shrink by the
-        # full offset keeps straight walls rather than sinking the whole glyph.
-        try:
-            hole = _loft_pair(inner, _offset_wire(inner, delta, grow=False), depth)
-        except Exception:
-            hole = _straight(cq.Face.makeFromWires(inner), depth)
-        solid = solid.cut(hole)
-    return solid
+    This is the letterform swept by a disk growing from nothing at the
+    stamping face to ``delta`` at the far end: a Minkowski sum with a cone. A
+    wedge along every boundary edge covers the edge sweeps and a cone at every
+    vertex covers the vertex sweeps, which is the whole boundary, and the
+    boundary is all that needs covering since the interior only grows.
+
+    Every vertex needs its cone, however straight the boundary runs through
+    it. A wedge stops at the ends of its own edge, so the triangular cap on
+    each end is left bare unless something covers it, and only the cone at
+    that vertex does: the neighbouring wedge does not reach past the shared
+    point, no matter how nearly collinear the two edges are. Skipping cones at
+    near-straight vertices leaves a vertical wall the full height of the
+    relief at each one, which is a visible fault and not a small one.
+    """
+    for polygon in polygons:
+        count = len(polygon)
+        for i in range(count):
+            here, following = polygon[i], polygon[(i + 1) % count]
+            if math.hypot(following[0] - here[0], following[1] - here[1]) > EPS:
+                yield _wedge(here, following, depth, delta)
+            yield cq.Solid.makeCone(
+                0,
+                delta,
+                depth,
+                cq.Vector(here[0], here[1], 0),
+                cq.Vector(0, 0, 1),
+            )
 
 
-def _draft_solid(face, depth, draft):
+def _extrude(faces, polygons, depth, draft):
+    """Extrude the letterform, widening as it goes.
+
+    Every wall is a plane leaning at exactly the draft angle, or a cone of
+    exactly that half-angle, because that is what the pieces are made of.
+    There is no profile to offset and no correspondence for a loft to infer,
+    which is what the previous offset-and-loft arrangement kept getting wrong:
+    an outline whose offset collapsed an edge left the loft pairing walls off
+    by one, and the draft came out skewed from that point around.
+
+    The cost is a boolean over a few hundred simple solids, so the part count,
+    and with it the time, follows the chord tolerance of stage two.
+    """
+    prisms = [_straight(face, depth) for face in faces]
+    plain = (
+        prisms[0]
+        if len(prisms) == 1
+        else reduce(lambda a, b: a.fuse(b), prisms)
+    )
+    if abs(draft) < 1e-9:
+        return cq.Workplane("XY").add(plain)
+
     delta = depth * math.tan(math.radians(draft))
     try:
-        solid = _draft_one(face, depth, delta)
-        if not solid.isValid():
-            raise ValueError("the drafted solid came out invalid")
-        return solid
+        drafted = plain.fuse(*_draft_parts(polygons, depth, delta)).clean()
+        if not drafted.isValid():
+            raise ValueError("the union came out invalid")
     except Exception as exc:
         warnings.warn(
             f"could not apply a {draft:g} degree draft: {exc}. Extruding with "
-            f"straight walls instead. The draft has to move the walls "
-            f"{delta:.2f} mm sideways, and an outline with detail finer than "
-            f"that cannot absorb it; a smaller --depth or --draft asks for less "
-            f"room",
+            f"straight walls instead",
             DraftDropped,
         )
-        return _straight(face, depth)
+        return cq.Workplane("XY").add(plain)
 
+    return cq.Workplane("XY").add(drafted)
 
-def _extrude(faces, depth, draft):
-    """Extrude the letterform, widening as it goes.
-
-    Every wall comes from a loft between the outline and a 2D offset of it.
-    cadquery's tapered extrusion would be the obvious tool, but the underlying
-    ``LocOpe_DPrism`` refuses faces with inner wires and fails outright on many
-    real letterforms, as does ``BRepOffsetAPI_DraftAngle``.
-    """
-    if abs(draft) < 1e-9:
-        return cq.Workplane("XY").add(faces).toPending().extrude(depth)
-
-    solids = [_draft_solid(f, depth, draft) for f in faces]
-    shape = solids[0] if len(solids) == 1 else reduce(lambda a, b: a.fuse(b), solids)
-    return cq.Workplane("XY").add(shape)
 
 
 def _overhang_warning(body, outline):
@@ -286,10 +281,15 @@ def build_stamp(
         raise ValueError("draft must be between -45 and 45 degrees")
 
     faces = contours_to_faces(outline.contours, tolerance)
+    polygons = flatten(outline.contours, tolerance)
     _min_feature_warning(faces, depth, draft)
 
     # Built letterform-down and widening upward, then turned over so the
     # letterform is the top face.
-    body = _extrude(faces, depth, draft).mirror("XY").translate((0, 0, depth))
+    body = (
+        _extrude(faces, polygons, depth, draft)
+        .mirror("XY")
+        .translate((0, 0, depth))
+    )
 
     return _add_base(body, outline, base_thickness, base_chamfer)

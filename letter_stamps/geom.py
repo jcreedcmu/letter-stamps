@@ -12,7 +12,12 @@ from .glyph import flatten
 
 #: Flattening tolerance in mm. No point on a curve ends up further than this
 #: from the polyline that stands in for it.
-DEFAULT_TOLERANCE = 0.01
+#:
+#: It also sets how many pieces the draft in ``stamp`` is built from, and so
+#: how long a letter takes to build. On a 15 mm letter this is a finer
+#: tolerance than the printer will resolve, and coarsening it is the dial to
+#: reach for if build time matters.
+DEFAULT_TOLERANCE = 0.03
 
 
 def signed_area(polygon):
